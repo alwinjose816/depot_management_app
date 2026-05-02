@@ -1534,14 +1534,31 @@ if st.session_state.logged_in and st.session_state.user is not None:
             good_stock = selected_loc_data.get("number_of_bags", 0) or 0
             damaged_stock = selected_loc_data.get("damaged_bags", 0) or 0
 
-            st.info(f"📦 Good: {good_stock} | Damaged: {damaged_stock}")
+            # -------- FETCH ALREADY REQUESTED DAMAGE --------
+            existing_damage = supabase.table("damage_requests") \
+                .select("quantity") \
+                .eq("product_id", product_id) \
+                .eq("depot_id", DEPOT_ID) \
+                .eq("row_no", row_no) \
+                .eq("column_no", column_no) \
+                .eq("status", "pending") \
+                .execute()
 
+            already_requested = sum([d["quantity"] for d in existing_damage.data]) if existing_damage.data else 0
+
+            available_stock = good_stock - already_requested
+
+            # -------- DISPLAY UPDATED INFO --------
+            st.info(f"📦 Good: {good_stock} | Already Requested: {already_requested} | Available: {available_stock}")
         else:
             st.warning("⚠️ No available stock locations for this product")
             st.stop()
 
-        qty = st.number_input("Quantity Damaged", min_value=1, max_value=good_stock)
+        if available_stock <= 0:
+            st.warning("⚠️ All stock already marked for damage request")
+            st.stop()
 
+        qty = st.number_input("Quantity Damaged", min_value=1, max_value=available_stock)
         damage_type = st.selectbox(
             "Damage Type",
             ["Broken", "Moisture damage", "Expired", "Transit damage"]
