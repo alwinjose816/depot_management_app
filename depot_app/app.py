@@ -229,6 +229,52 @@ if st.session_state.logged_in and st.session_state.user is None:
 if st.session_state.logged_in and st.session_state.user is not None:
     user = st.session_state.user
     depot_code = user["depot_code"]
+    # ================= AUTO LOCATION TRACKING =================
+
+    from streamlit_js_eval import streamlit_js_eval
+    from datetime import datetime
+
+    # every 30 min
+    TRACK_INTERVAL = 1800
+
+    if "last_location_update" not in st.session_state:
+        st.session_state.last_location_update = None
+
+    now_ts = datetime.now().timestamp()
+
+    should_update = (
+        st.session_state.last_location_update is None
+        or
+        (now_ts - st.session_state.last_location_update) > TRACK_INTERVAL
+    )
+
+    if should_update:
+
+        location = streamlit_js_eval(
+            js_expressions="""
+            new Promise((resolve, reject) => {
+                navigator.geolocation.getCurrentPosition(
+                    (pos) => resolve({
+                        latitude: pos.coords.latitude,
+                        longitude: pos.coords.longitude
+                    }),
+                    (err) => resolve(null)
+                );
+            })
+            """,
+            key="get_location"
+        )
+
+        if location:
+
+            supabase.table("employee_location").insert({
+                "emp_id": user["id"],
+                "depot_code": depot_code,
+                "latitude": location["latitude"],
+                "longitude": location["longitude"]
+            }).execute()
+
+            st.session_state.last_location_update = now_ts
     
 
     st.title(f"🏭 Depot Hub - {depot_code}")
@@ -268,10 +314,12 @@ if st.session_state.logged_in and st.session_state.user is not None:
           for item in stock_data
        ) if stock_data else 0
 
-       used_mt = sum(
-         float(item["available_stock"])
-         for item in stock_data
-       ) if stock_data else 0
+       used_bags = sum(
+            int(item["number_of_bags"])
+            for item in stock_details.data
+       ) if stock_details.data else 0
+
+       used_mt = round((used_bags * 50) / 1000, 1)
 
 # ---------------- DEPOT CAPACITY ----------------
        depot_info = supabase.table("depot_master") \
@@ -522,27 +570,30 @@ if st.session_state.logged_in and st.session_state.user is not None:
 
       
        # ---------------- UTILIZATION DATA ----------------
-       used_mt = sum(
-          float(item["available_stock"])
-          for item in stock_details.data
-       ) if stock_details.data else 0
+       # ---------------- UTILIZATION DATA ----------------
 
        depot_info = supabase.table("depot_master") \
-         .select("capacity_mt") \
-         .eq("depot_code", depot_code) \
-         .execute()
+            .select("capacity_mt") \
+            .eq("depot_code", depot_code) \
+            .execute()
 
        capacity_mt = float(depot_info.data[0]["capacity_mt"])
-       available_mt = capacity_mt - used_mt
+
+       used_bags = sum(
+            int(item["number_of_bags"])
+            for item in stock_details.data
+       ) if stock_details.data else 0
+
+        # 1 bag = 50 kg
+       used_mt = round((used_bags * 50) / 1000, 1)
+
+       available_mt = round(capacity_mt - used_mt, 1)
 
        capacity_bags = int(capacity_mt * 20)
-       used_bags = sum(
-          int(item["number_of_bags"])
-          for item in stock_details.data
-       ) if stock_details.data else 0
+
        available_bags = capacity_bags - used_bags
 
-       utilization = (used_mt / capacity_mt) * 100
+       utilization = round((used_mt / capacity_mt) * 100, 1)
 
 # ---------------- ACTIVE DAYS ----------------
        if overall_orders_data:
@@ -1523,8 +1574,19 @@ if st.session_state.logged_in and st.session_state.user is not None:
 
             selected_location = st.selectbox("Select Location", location_options)
 
-            row_no = int(selected_location.split()[1])
-            column_no = int(selected_location.split()[4])
+            import re
+
+            match = re.search(
+                r"Row\s+(\d+)\s*-\s*Col\s+(\d+)",
+                selected_location
+            )
+
+            if match:
+                row_no = int(match.group(1))
+                column_no = int(match.group(2))
+            else:
+                st.error("Invalid location format")
+                st.stop()
 
             selected_loc_data = next(
                 loc for loc in valid_locations
@@ -1558,7 +1620,16 @@ if st.session_state.logged_in and st.session_state.user is not None:
             st.warning("⚠️ All stock already marked for damage request")
             st.stop()
 
-        qty = st.number_input("Quantity Damaged", min_value=1, max_value=available_stock)
+        if "submit_clicked" not in st.session_state:
+            st.session_state.submit_clicked = False
+        # -------- INPUTS (NO FORM) --------
+        qty = st.number_input(
+            "Quantity Damaged",
+            min_value=1,
+            max_value=available_stock,
+            step=1
+        )
+
         damage_type = st.selectbox(
             "Damage Type",
             ["Broken", "Moisture damage", "Expired", "Transit damage"]
@@ -1566,26 +1637,59 @@ if st.session_state.logged_in and st.session_state.user is not None:
 
         remarks = st.text_area("Remarks")
 
+        # -------- SUBMIT BUTTON --------
         if st.button("Submit Damage"):
 
-            try:
-                supabase.table("damage_requests").insert({
-                    "product_id": product_id,
-                    "product_name": selected_product,
-                    "quantity": qty,
-                    "damage_type": damage_type,
-                    "remarks": remarks,
-                    "status": "pending",
-                    "depot_id": DEPOT_ID,
-                    "row_no": row_no,
-                    "column_no": column_no,
-                    "created_by": st.session_state.user["email"]
-                }).execute()
+            if not remarks.strip():
+                st.error("❌ Enter remarks")
 
-                st.success("✅ Damage request sent to admin")
-                st.rerun() 
-            except Exception as e:
-                st.error(f"❌ Error: {str(e)}")
+            elif qty > available_stock:
+                st.error("❌ Exceeds available stock")
+
+            elif already_requested + qty > good_stock:
+                st.error("❌ Total damage exceeds stock")
+
+            else:
+                # 🔥 BACKEND DUPLICATE PROTECTION
+                existing = supabase.table("damage_requests") \
+                    .select("*") \
+                    .eq("product_id", product_id) \
+                    .eq("depot_id", DEPOT_ID) \
+                    .eq("row_no", row_no) \
+                    .eq("column_no", column_no) \
+                    .eq("status", "pending") \
+                    .order("id", desc=True) \
+                    .limit(1) \
+                    .execute()
+
+                if existing.data:
+                    last = existing.data[0]
+
+                    # prevent duplicate click
+                    if last["quantity"] == qty and last["remarks"] == remarks:
+                        st.warning("⚠️ Duplicate request ignored")
+                        st.stop()
+
+                try:
+                    supabase.table("damage_requests").insert({
+                        "product_id": product_id,
+                        "product_name": selected_product,
+                        "quantity": qty,
+                        "damage_type": damage_type,
+                        "remarks": remarks,
+                        "status": "pending",
+                        "depot_id": DEPOT_ID,
+                        "row_no": row_no,
+                        "column_no": column_no,
+                        "created_by": st.session_state.user["email"]
+                    }).execute()
+
+                    st.success("✅ Damage request sent")
+                    st.rerun()
+
+                except Exception as e:
+                    st.error(f"❌ Error: {str(e)}")
+                    st.session_state.submit_clicked = False
             # ---------------- ALWAYS SHOW PENDING LIST ----------------
         st.markdown("### 📋 Pending Requests")
 
@@ -1600,11 +1704,18 @@ if st.session_state.logged_in and st.session_state.user is not None:
             st.info("No pending requests")
         else:
             st.dataframe(data.data, use_container_width=True)
-    if menu == "Logout":
-    # Clear session
+    elif menu == "Logout":
+
+    # Supabase logout
+        try:
+            supabase.auth.sign_out()
+        except:
+            pass
+
+        # Clear session
         for key in list(st.session_state.keys()):
             del st.session_state[key]
 
         st.success("Logged out successfully")
 
-        st.rerun()
+        st.rerun()       
