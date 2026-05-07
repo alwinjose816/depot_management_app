@@ -5,6 +5,7 @@ import requests
 import plotly.graph_objects as go
 import plotly.express as px
 from datetime import datetime, timedelta
+from streamlit_js_eval import streamlit_js_eval
 import threading
 import streamlit.components.v1 as components
 st.set_page_config(layout="wide")
@@ -229,14 +230,10 @@ if st.session_state.logged_in and st.session_state.user is None:
 if st.session_state.logged_in and st.session_state.user is not None:
     user = st.session_state.user
     depot_code = user["depot_code"]
-    # ================= AUTO LOCATION TRACKING =================
-
-    from streamlit_js_eval import get_geolocation
-    from datetime import datetime
 
     # ================= AUTO LOCATION TRACKING =================
 
-    TRACK_INTERVAL = 1800  # 30 mins
+    TRACK_INTERVAL = 1800  # 30 minutes
 
     if "last_location_update" not in st.session_state:
         st.session_state.last_location_update = 0
@@ -249,18 +246,28 @@ if st.session_state.logged_in and st.session_state.user is not None:
 
     if should_update:
 
-        loc = get_geolocation()
+        location = streamlit_js_eval(
+            js_expressions="""
+            new Promise((resolve, reject) => {
+                navigator.geolocation.getCurrentPosition(
+                    (pos) => resolve({
+                        latitude: pos.coords.latitude,
+                        longitude: pos.coords.longitude
+                    }),
+                    (err) => resolve(null)
+                );
+            })
+            """,
+            key="location"
+        )
 
-        if loc:
-
-            lat = loc["coords"]["latitude"]
-            lon = loc["coords"]["longitude"]
+        if location:
 
             supabase.table("employee_location").insert({
                 "emp_id": user["id"],
                 "depot_code": depot_code,
-                "latitude": lat,
-                "longitude": lon
+                "latitude": location["latitude"],
+                "longitude": location["longitude"]
             }).execute()
 
             st.session_state.last_location_update = now_ts
