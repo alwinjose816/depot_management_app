@@ -231,47 +231,36 @@ if st.session_state.logged_in and st.session_state.user is not None:
     depot_code = user["depot_code"]
     # ================= AUTO LOCATION TRACKING =================
 
-    from streamlit_js_eval import streamlit_js_eval
+    from streamlit_js_eval import get_geolocation
     from datetime import datetime
 
-    # every 30 min
-    TRACK_INTERVAL = 1800
+    # ================= AUTO LOCATION TRACKING =================
+
+    TRACK_INTERVAL = 1800  # 30 mins
 
     if "last_location_update" not in st.session_state:
-        st.session_state.last_location_update = None
+        st.session_state.last_location_update = 0
 
     now_ts = datetime.now().timestamp()
 
     should_update = (
-        st.session_state.last_location_update is None
-        or
-        (now_ts - st.session_state.last_location_update) > TRACK_INTERVAL
-    )
+        now_ts - st.session_state.last_location_update
+    ) > TRACK_INTERVAL
 
     if should_update:
 
-        location = streamlit_js_eval(
-            js_expressions="""
-            new Promise((resolve, reject) => {
-                navigator.geolocation.getCurrentPosition(
-                    (pos) => resolve({
-                        latitude: pos.coords.latitude,
-                        longitude: pos.coords.longitude
-                    }),
-                    (err) => resolve(null)
-                );
-            })
-            """,
-            key="get_location"
-        )
+        loc = get_geolocation()
 
-        if location:
+        if loc:
+
+            lat = loc["coords"]["latitude"]
+            lon = loc["coords"]["longitude"]
 
             supabase.table("employee_location").insert({
                 "emp_id": user["id"],
                 "depot_code": depot_code,
-                "latitude": location["latitude"],
-                "longitude": location["longitude"]
+                "latitude": lat,
+                "longitude": lon
             }).execute()
 
             st.session_state.last_location_update = now_ts
