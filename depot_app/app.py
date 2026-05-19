@@ -431,7 +431,7 @@ if st.session_state.logged_in and st.session_state.user is not None:
 # k1 - Avg Selling Rate
        with k1:
             st.markdown(
-                kpi_card("📈 Avg Selling Rate", f"{avg_selling_rate:.1f}/day"),
+                kpi_card("📈 Avg Dispatch Quantity", f"{avg_selling_rate:.1f}/day"),
                 unsafe_allow_html=True
             )
 
